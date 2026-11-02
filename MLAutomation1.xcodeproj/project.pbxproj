@@ -22,6 +22,10 @@
 		C9F8D12D2F7423BB00D3232D /* Task3.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9F8D12C2F7423BB00D3232D /* Task3.swift */; };
 		EC92DD5D2F693A5C00BAD192 /* Task2.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC92DD5C2F693A5600BAD192 /* Task2.swift */; };
 		F1A2B3C42F80000100FENG01 /* FengyaoTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C32F80000100FENG01 /* FengyaoTask.swift */; };
+		B7E4A1022F91000100A10001 /* BattlePopupFinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E4A1012F91000100A10001 /* BattlePopupFinder.swift */; };
+		B7E4A1042F91000100A10002 /* MHXYFront.mlmodel in Resources */ = {isa = PBXBuildFile; fileRef = B7E4A1032F91000100A10002 /* MHXYFront.mlmodel */; };
+		B7E4A1062F91000100A10003 /* popup_flag_1.jpg in Resources */ = {isa = PBXBuildFile; fileRef = B7E4A1052F91000100A10003 /* popup_flag_1.jpg */; };
+		B7E4A1082F91000100A10004 /* popup_flag_2.jpg in Resources */ = {isa = PBXBuildFile; fileRef = B7E4A1072F91000100A10004 /* popup_flag_2.jpg */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -43,6 +47,10 @@
 		C9F8D12C2F7423BB00D3232D /* Task3.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Task3.swift; sourceTree = "<group>"; };
 		EC92DD5C2F693A5600BAD192 /* Task2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Task2.swift; sourceTree = "<group>"; };
 		F1A2B3C32F80000100FENG01 /* FengyaoTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FengyaoTask.swift; sourceTree = "<group>"; };
+		B7E4A1012F91000100A10001 /* BattlePopupFinder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BattlePopupFinder.swift; sourceTree = "<group>"; };
+		B7E4A1032F91000100A10002 /* MHXYFront.mlmodel */ = {isa = PBXFileReference; lastKnownFileType = file.mlmodel; path = MHXYFront.mlmodel; sourceTree = "<group>"; };
+		B7E4A1052F91000100A10003 /* popup_flag_1.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = popup_flag_1.jpg; sourceTree = "<group>"; };
+		B7E4A1072F91000100A10004 /* popup_flag_2.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = popup_flag_2.jpg; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -83,9 +91,21 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		B7E4A1092F91000100A10005 /* PopupFlags */ = {
+			isa = PBXGroup;
+			children = (
+				B7E4A1052F91000100A10003 /* popup_flag_1.jpg */,
+				B7E4A1072F91000100A10004 /* popup_flag_2.jpg */,
+			);
+			path = PopupFlags;
+			sourceTree = "<group>";
+		};
 		C9C1CAB42F651B9A00BC9736 /* MLAutomation1 */ = {
 			isa = PBXGroup;
 			children = (
+				B7E4A1092F91000100A10005 /* PopupFlags */,
+				B7E4A1012F91000100A10001 /* BattlePopupFinder.swift */,
+				B7E4A1032F91000100A10002 /* MHXYFront.mlmodel */,
 				C906C8BA2F66F73600AC0ADB /* task */,
 				C9C1CAD92F651F8D00BC9736 /* Info.plist */,
 				C9C1CAD52F651D5600BC9736 /* SceneDetector.swift */,
@@ -172,6 +192,9 @@
 			files = (
 				C9C1CABD2F651B9C00BC9736 /* Preview Assets.xcassets in Resources */,
 				C9C1CABA2F651B9C00BC9736 /* Assets.xcassets in Resources */,
+				B7E4A1042F91000100A10002 /* MHXYFront.mlmodel in Resources */,
+				B7E4A1062F91000100A10003 /* popup_flag_1.jpg in Resources */,
+				B7E4A1082F91000100A10004 /* popup_flag_2.jpg in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -195,6 +218,7 @@
 				C9C1CAD02F651D3700BC9736 /* BotEngine.swift in Sources */,
 				C9C1CAB82F651B9A00BC9736 /* ContentView.swift in Sources */,
 				C9C1CAB62F651B9A00BC9736 /* MLAutomation1App.swift in Sources */,
+				B7E4A1022F91000100A10001 /* BattlePopupFinder.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -326,6 +350,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MLAutomation1/MLAutomation1.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -357,6 +382,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MLAutomation1/MLAutomation1.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;

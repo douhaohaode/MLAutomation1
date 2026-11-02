@@ -115,12 +115,14 @@ enum BattleStrategy: String, CaseIterable, Identifiable {
 }
 
 // MARK: - 游戏窗口信息
+// 一次扫描得到的一扇窗口。两个游戏客户端 = 两个 GameWindow，各自交给一个 BotEngine。
+// id 和 pid 不是一回事：pid 是进程，一个进程里可以有很多扇窗；id 才是这一扇窗。
 struct GameWindow {
-    var id: Int
-    var pid: Int32
-    var title: String
-    var frame: CGRect
-    var instanceIndex: Int
+    var id: Int                 // 系统分配的窗口编号（CGWindowID）。切换、截图、对位置都用它
+    var pid: Int32              // 拥有这扇窗的进程号。两个 mhmain.exe 是两个不同的 pid
+    var title: String           // 窗口标题，没有标题时用进程名
+    var frame: CGRect           // 窗口在屏幕上的矩形。原点是屏幕左上角，单位是点
+    var instanceIndex: Int      // 扫描时的顺序，用来让界面上的实例顺序保持稳定
     /// kCGWindowLayer：普通应用窗口 = 0，Wine 根窗口/桌面层 < 0，悬浮面板 > 0
     var layer: Int = 0
 

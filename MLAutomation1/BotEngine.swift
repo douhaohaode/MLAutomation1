@@ -100,6 +100,11 @@ class BotEngine {
     
     private let state:    InstanceState
     private let detector: SceneDetector = SceneDetector()
+    private let popupFinder = BattlePopupFinder()
+    /// 点过选人框之后短时间内不再点，避免弹框还没收完就连点。
+    private var lastPopupClickAt = Date.distantPast
+    /// 没找到弹框时最多一秒看一次，避免整场战斗都在跑模型。
+    private var lastPopupScanAt = Date.distantPast
     private var onLog:    ((LogEntry) -> Void)?
 
     private var task:      Task<Void, Never>?
@@ -157,6 +162,21 @@ class BotEngine {
 
     // 🔧 调试：点击坐标监听
     private var clickMonitor: Any?
+
+    /// 两个及以上烧双窗口同时运行时，由 AppState 统一决定点哪一扇。
+    /// 为 true 时，本引擎只负责截图，不再自己按键点击。
+    private let coordLock = NSLock()
+    private var _coordinatedShaoshuang = false
+    var coordinatedShaoshuang: Bool {
+        get { coordLock.lock(); defer { coordLock.unlock() }; return _coordinatedShaoshuang }
+        set { coordLock.lock(); defer { coordLock.unlock() }; _coordinatedShaoshuang = newValue }
+    }
+    var instanceID: Int { state.id }
+
+    // 上一轮观察到的坐标。用来判断人是否还在走。
+    private var lastWalkX = ""
+    private var lastWalkY = ""
+    private var hasWalkBaseline = false
 
     /// taskMode 直接读 state.taskMode，UI 通过 InstanceState 的 @Published 驱动刷新
     var taskMode: TaskMode {
@@ -270,7 +290,7 @@ class BotEngine {
 
               // 黑边自动检测已禁用：自动检测在游戏加载画面等深色场景下会产生错误偏移值，
               // 导致每次点击都带有额外偏差，反而更不准确。
-              // 坐标系：直接使用 window.frame（激活后由 activateAndStabilize 保证是最新稳定值）。
+              // 坐标系：直接使用 window.frame（每次点击前会重新读取窗口位置）。
 
               while isRunning && !Task.isCancelled {
        
@@ -311,6 +331,11 @@ class BotEngine {
                   
                   // ── 任务 ──────────────────────────────────────
                     if taskMode == .shaoshuang {
+                        // 多窗口时点击交给总调度。这里继续截图，供调度看战斗和坐标。
+                        if coordinatedShaoshuang {
+                            try? await Task.sleep(nanoseconds: 300_000_000)
+                            continue
+                        }
                         async let mapNameTask    = detector.ocrRegion(cgImage, region: UIRegions.locationPx)
                         async let coordinateTask = detector.ocrRegion(cgImage, region: UIRegions.fightPx)
                         async let xPxTask        = detector.ocrRegion(cgImage, region: UIRegions.xPx)
@@ -332,6 +357,10 @@ class BotEngine {
                         print("玩家停止, 地图: \(mapName)")
 
                         if coordinate.contains("回合") {
+                            if await clickFrontPortrait(in: cgImage) {
+                                await humanDelay(0.8...1.4)
+                                continue
+                            }
                             print("战斗中，等待回合结束")
                             continue
                         }
@@ -497,11 +526,84 @@ class BotEngine {
     }
     
     
+    // MARK: - 烧双：给总调度看的状态，以及一整段走路
+
+    /// 看这一扇窗现在的状态。截图不需要把窗口抬到最前。
+    /// moved：坐标相对上一次变了，说明人还在走。
+    /// inBattle：战斗区域里出现「回合」。
+    func readShaoshuangView() async -> (inBattle: Bool, moved: Bool)? {
+        guard let cgImage = await freshFrame() else { return nil }
+        async let fightTask = detector.ocrRegion(cgImage, region: UIRegions.fightPx)
+        async let xTask     = detector.ocrRegion(cgImage, region: UIRegions.xPx)
+        async let yTask     = detector.ocrRegion(cgImage, region: UIRegions.yPx)
+        let (fight, x, y) = await (fightTask, xTask, yTask)
+
+        let moved: Bool
+        if hasWalkBaseline {
+            moved = (x != lastWalkX) || (y != lastWalkY)
+        } else {
+            moved = false
+            hasWalkBaseline = true
+        }
+        lastWalkX = x
+        lastWalkY = y
+        return (fight.contains("回合"), moved)
+    }
+
+    /// 这一扇已经在战斗时才调用。有四人选人框就点正面角色。
+    func clickFrontPortraitIfPopup() async -> Bool {
+        if Date().timeIntervalSince(lastPopupClickAt) < 2.5 { return false }
+        guard let cgImage = await freshFrame() else { return false }
+        let fight = await detector.ocrRegion(cgImage, region: UIRegions.fightPx)
+        guard fight.contains("回合") else { return false }
+        return await clickFrontPortrait(in: cgImage)
+    }
+
+    /// 用 mhxy 模型在当前截图里找正面角色并点击。没有弹框返回 false。
+    func clickFrontPortrait(in cgImage: CGImage) async -> Bool {
+        if Date().timeIntervalSince(lastPopupClickAt) < 2.5 { return false }
+        if Date().timeIntervalSince(lastPopupScanAt) < 1.0 { return false }
+        lastPopupScanAt = Date()
+        guard let hit = await popupFinder.frontPortrait(in: cgImage) else { return false }
+        lastPopupClickAt = Date()
+        let scores = hit.logits.map { String(format: "%.2f", $0) }.joined(separator: ", ")
+        log(scene: .battleMyTurn,
+            action: "战斗弹框：点正面角色 #\(hit.index + 1)",
+            detail: "logits [\(scores)]")
+        WindowService.clickAtOCR(window: &state.window,
+                                 normX: hit.center.x, normY: hit.center.y,
+                                 srcW: cgImage.width, srcH: cgImage.height,
+                                 noiseRadius: 2)
+        try? await Task.sleep(nanoseconds: UInt64(Double.random(in: clickInterval) * 1_000_000_000))
+        return true
+    }
+
+    /// 一整段走路：Tab 打开地图、点坐标、Tab 关上。
+    /// 这三步都作用在本窗口上，中间不交给另一扇。调度在本方法返回后再切换。
+    func performShaoshuangWalk() async {
+        guard isRunning else { return }
+        let targetPos = getRandomPosition(from: [
+            SkillSlots.DF1, SkillSlots.DF2, SkillSlots.DF3, SkillSlots.DF4
+        ])
+        log(scene: .unknown, action: "走路：打开地图")
+        await humanDelay(0.3...0.6)
+        guard isRunning else { return }
+        await pressKey(GameKeys.tab)
+        guard isRunning else { return }
+        await humanDelay(0.8...1.4)
+        guard isRunning else { return }
+        log(scene: .unknown, action: "走路：点击坐标")
+        await click(targetPos)
+        guard isRunning else { return }
+        await humanDelay(1.8...2.6)
+        guard isRunning else { return }
+        await pressKey(GameKeys.tab)
+        log(scene: .unknown, action: "走路：关闭地图，准备交给另一扇")
+    }
+
     // MARK: - 辅助
     private func pressKey(_ keyCode: CGKeyCode) async {
-        WindowService.activateApp(pid: state.window.pid)
-        Thread.sleep(forTimeInterval: 0.06)
-        WindowService.pressKey(keyCode)          // ✅ _ 参数，无标签
+        WindowService.pressKey(keyCode, window: &state.window)
         try? await Task.sleep(nanoseconds: UInt64(Double.random(in: clickInterval) * 1_000_000_000))
     }
 

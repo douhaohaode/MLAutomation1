@@ -178,7 +178,7 @@ class QuestFlow {
         }
          // 1-2. Command+E 打开行囊
         // Cmd + E 打开道具行囊
-        WindowService.pressKeys(KeyCode.e, modifiers: .maskCommand, window: state.window)
+        WindowService.pressKeys(KeyCode.e, modifiers: .maskCommand, window: &state.window)
          // 延迟0.3到0.8秒
         await humanDelay(0.3...0.8)
 
@@ -197,7 +197,7 @@ class QuestFlow {
                return .retry(reason: "传送超时，未到达长安城")
            }
 
-           WindowService.pressKeys(KeyCode.e, modifiers: .maskCommand, window: state.window)
+           WindowService.pressKeys(KeyCode.e, modifiers: .maskCommand, window: &state.window)
            await humanDelay(0.1...0.3)
            cleanFalg();
            return .success
@@ -422,7 +422,7 @@ class QuestFlow {
                 .contains(where: { taskMap.contains($0) })
             if needsBagTeleport {
                // 打开行囊使用传送旗
-               WindowService.pressKeys(KeyCode.e, modifiers: .maskCommand, window: state.window)
+               WindowService.pressKeys(KeyCode.e, modifiers: .maskCommand, window: &state.window)
                 if taskMap == "大唐境外"{
                     await humanDelay(0.3...0.8)
                     await rightClick(TaskaParameter.xingNangDTGJ,noiseRadius: 0)
@@ -514,7 +514,7 @@ class QuestFlow {
 
                 if needsBagTeleport {
                     // 打开行囊使用传送旗
-                    WindowService.pressKeys(KeyCode.e, modifiers: .maskCommand, window: state.window)
+                    WindowService.pressKeys(KeyCode.e, modifiers: .maskCommand, window: &state.window)
                      if mapName == "大唐境外"{
                          await humanDelay(0.5...0.8)
                          await rightClick(TaskaParameter.xingNangDTGJ,noiseRadius: 0)
@@ -591,7 +591,7 @@ class QuestFlow {
     }
 
     private func pressKey(_ keyCode: CGKeyCode) async {
-        WindowService.pressKey(keyCode)
+        WindowService.pressKey(keyCode, window: &state.window)
         try? await Task.sleep(nanoseconds: UInt64(Double.random(in: 0.3...0.6) * 1_000_000_000))
     }
 

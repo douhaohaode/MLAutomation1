@@ -5,14 +5,22 @@
 
 import Foundation
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import ScreenCaptureKit
 
+// 辅助功能里的窗口对象没有公开接口能转回 CGWindowID。
+// 切换时必须靠这个对应关系，才能抬起“这一扇”而不是同进程里的另一扇。
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
+
 class WindowService {
 
-    static let gameProcessKeywords = ["mhmain.exe","Simulator"]
+    // 进程名或窗口标题里带这些词，才当成要控制的游戏窗口
+    static let gameProcessKeywords = ["mhmain.exe","Simulator","Google Chrome"]
 
     // MARK: - 发现游戏窗口（正式）
+    // 扫描当前屏幕上的窗口，滤出游戏，再按进程合并成“一个进程一扇主窗口”。
     static func discoverGameWindows() -> [GameWindow] {
 //        discoverWindows { owner, title in
 //            gameProcessKeywords.contains {
@@ -21,6 +29,7 @@ class WindowService {
 //            }
 //        }
         
+        // 先取出所有名字匹配的窗口。一个游戏进程里通常不止一扇（菜单条、边框、内容窗）
         let allMatched = discoverWindows { owner, title in
                 gameProcessKeywords.contains {
                     owner.localizedCaseInsensitiveContains($0) ||
@@ -33,9 +42,10 @@ class WindowService {
             //           layer < 0 是 Wine 虚拟桌面根窗口（会导致坐标偏移至屏幕左上角）
             //           layer > 0 是悬浮面板 / 工具窗
             // 优先级 2：同 layer 时取面积最大（内容窗口 > 装饰边框）
+            // key 是进程号。同一个进程最后只留一扇，所以两个游戏必须是两个进程才会出现两个实例
             var bestByPID: [Int32: GameWindow] = [:]
             for win in allMatched {
-                let area = win.frame.width * win.frame.height
+                let area = win.frame.width * win.frame.height   // 用面积区分内容窗和细边框
                 if let existing = bestByPID[win.pid] {
                     let existingArea = existing.frame.width * existing.frame.height
                     // 新窗口 layer 更优（接近 0 更好），或 layer 相同但面积更大
@@ -63,6 +73,8 @@ class WindowService {
     }
 
     // MARK: - 通用枚举
+    // 向系统要当前屏幕上的窗口列表，再按调用方给的条件过滤。
+    // 列表顺序是从最前到最后，但这里先全部收集，稍后才按进程挑选。
     private static func discoverWindows(filter: (String, String) -> Bool) -> [GameWindow] {
         guard let rawList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
@@ -84,16 +96,16 @@ class WindowService {
 
             let title = info[kCGWindowName as String] as? String ?? ownerName
             let w = bounds["Width"] ?? 0, h = bounds["Height"] ?? 0
-            guard w > 200 && h > 150 else { continue }
-            guard filter(ownerName, title) else { continue }
+            guard w > 200 && h > 150 else { continue }          // 丢掉菜单条、小浮窗
+            guard filter(ownerName, title) else { continue }    // 丢掉不是游戏的窗口
 
             let layer = info[kCGWindowLayer as String] as? Int ?? 0
             print("[WindowService] ✅ \(ownerName) | \(title) | \(Int(w))×\(Int(h)) | PID:\(pid) | Layer:\(layer)")
             results.append(GameWindow(
-                id: windowID, pid: pid,
+                id: windowID, pid: pid,                         // 编号认这一扇，进程号认是哪个客户端
                 title: title.isEmpty ? ownerName : title,
                 frame: CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0, width: w, height: h),
-                instanceIndex: idx,
+                instanceIndex: idx,                             // 第几个匹配到的，后面用来排序
                 layer: layer
             ))
             idx += 1
@@ -352,116 +364,194 @@ class WindowService {
         return result
     }
 
-    // MARK: - 激活 + 等待窗口位置稳定
-    // activateApp 让 app.isActive=true，但 Space 切换动画还需要额外时间，
-    // 动画期间 CGWindowListCopyWindowInfo 返回的是中途坐标，点击会偏移。
-    // 解决方案：激活后每 100ms 轮询一次 frame，连续 2 次 (<1pt) 不变化才认为稳定。
-    private static func activateAndStabilize(window: inout GameWindow) {
-        let app = NSRunningApplication(processIdentifier: window.pid)
+    // MARK: - 先把目标窗口切到最前，再发普通点击
+    // 游戏（Wine）只处理“这个屏幕点上最上层窗口”的鼠标。
+    // 两扇窗叠在一起时，必须先把要操作的那一扇抬上来，点击才会进它。
+    // 流程：已在最前就直接点；否则按窗口编号 AXRaise → 确认最上层已经是它 → 再点。
 
-           // ── 优化1：游戏已在前台，跳过激活，只刷新 frame ──────────────
-           // 重复激活 Wine 进程会触发层级动画，导致 frame 抖动。
-           // Bot 运行期间游戏通常一直在前台，此分支覆盖 90% 的调用。
-           if app?.isActive == true {
-               if let fresh = getWindowFrame(windowID: window.id) {
-                   window.frame = fresh
-               }
-               return
-           }
+    private static let inputLock = NSLock()          // 两个实例共用。一扇抬起并点完，另一扇才能抬
+    private static var didPromptAccessibility = false // 辅助功能弹窗只弹一次
+    private static var didLogNeedAX = false           // “没权限”只打印一次，避免刷屏
+    private static var didLogRaiseFail = false        // “抬不起来”只打印一次
 
-           // ── 需要激活：等待 Wine 层级动画真正结束 ────────────────────
-           activateApp(pid: window.pid)
+    /// 点击前刷新这扇窗的位置。窗口被拖动后，旧的 frame 会点偏。
+    private static func refreshIdentity(window: inout GameWindow) {
+        if let fresh = getWindowFrame(windowID: window.id) {
+            window.frame = fresh                         // 编号还在，只更新矩形
+        } else if let found = findWindowByPID(window.pid) {
+            window.id = found.id                         // 窗口被关掉重开，编号变了，用进程号找回
+            window.frame = found.frame
+        }
+    }
 
-           var prevX: CGFloat = -.infinity
-           var prevY: CGFloat = -.infinity
-           var stableCount    = 0
+    /// 问系统：这个屏幕点上，最上层的普通窗口是谁。
+    /// 窗口列表从前到后，第一个盖住该点的就是当前会吃掉点击的那扇。
+    private static func frontmostWindowID(at point: CGPoint) -> Int? {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }       // 拿不到列表（通常是没有屏幕录制权限）
 
-           for _ in 0..<40 { // 最长等待 4 秒（40 × 100ms）
-               Thread.sleep(forTimeInterval: 0.1)
+        for info in list {                               // 从前到后看
+            let layer = info[kCGWindowLayer as String] as? Int ?? 0
+            guard layer == 0,                            // 只要普通窗口，跳过菜单栏、程序坞
+                  let wid = info[kCGWindowNumber as String] as? Int,
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let w = bounds["Width"], let h = bounds["Height"],
+                  w > 20, h > 20                         // 忽略极小的装饰窗
+            else { continue }
+            let frame = CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0, width: w, height: h)
+            if frame.contains(point) { return wid }      // 这扇盖住了该点，它就是最上层
+        }
+        return nil                                       // 这个点上没有任何普通窗口
+    }
 
-               let fresh: CGRect
-               if let f = getWindowFrame(windowID: window.id) {
-                   fresh = f
-               } else if let found = findWindowByPID(window.pid) {
-                   window.id = found.id
-                   fresh = found.frame
-               } else {
-                   continue
-               }
+    /// 有没有辅助功能权限。没有权限就无法把别的进程的窗口抬到最前。
+    private static func accessibilityTrusted(prompt: Bool) -> Bool {
+        if AXIsProcessTrusted() { return true }          // 已经允许过，直接通过
+        guard prompt else { return false }               // 调用方说这次不要弹系统框
+        guard !didPromptAccessibility else { return false } // 已经弹过一次，不再反复弹
+        didPromptAccessibility = true
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        return AXIsProcessTrustedWithOptions([key: true] as CFDictionary) // 弹出系统授权框
+    }
 
-               // ── 优化2：阈值收紧到 0.5pt，连续 5 次（500ms）才算稳定 ──
-               if abs(fresh.minX - prevX) < 0.5 && abs(fresh.minY - prevY) < 0.5 {
-                   stableCount += 1
-               } else {
-                   stableCount = 0  // 任何抖动都重置，必须重新计数
-               }
-               prevX = fresh.minX
-               prevY = fresh.minY
-               window.frame = fresh
+    /// 读辅助功能窗口的位置和大小。编号对不上时，用矩形再对一次。
+    private static func axFrame(_ element: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let posRef, let sizeRef,
+              CFGetTypeID(posRef) == AXValueGetTypeID(),  // 确认拿到的是坐标，不是别的类型
+              CFGetTypeID(sizeRef) == AXValueGetTypeID()
+        else { return nil }
+        var pos = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
+              AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
+        else { return nil }
+        return CGRect(origin: pos, size: size)
+    }
 
-               if stableCount >= 5 { break } // 连续 500ms 不动，动画已结束
-           }
+    /// 把传入的这一扇窗口抬到最前。返回值表示“抬起”这个动作有没有发出去，不表示已经在最前。
+    @discardableResult
+    private static func raiseSpecificWindow(_ window: GameWindow) -> Bool {
+        guard accessibilityTrusted(prompt: true) else {  // 没权限就无法切换
+            if !didLogNeedAX {
+                didLogNeedAX = true
+                print("[WindowService] 没有辅助功能权限，无法把被挡住的游戏窗口切到最前。请在系统设置 → 隐私与安全性 → 辅助功能中允许本应用。")
+            }
+            return false
+        }
 
-           // ── 优化3：稳定后再取一次最终 frame，防止"动画末尾假稳定" ──
-           Thread.sleep(forTimeInterval: 0.1)
-           if let finalFrame = getWindowFrame(windowID: window.id) {
-               window.frame = finalFrame
-           }
-//        activateApp(pid: window.pid)
-//
-//        var prevX: CGFloat = -.infinity
-//        var prevY: CGFloat = -.infinity
-//        var stableCount    = 0
-//
-//        for _ in 0..<20 { // 最长等待 2 秒
-//            Thread.sleep(forTimeInterval: 0.1)
-//
-//            let fresh: CGRect
-//            if let f = getWindowFrame(windowID: window.id) {
-//                fresh = f
-//            } else if let found = findWindowByPID(window.pid) {
-//                window.id = found.id
-//                fresh = found.frame
-//            } else {
-//                continue
-//            }
-//
-//            if abs(fresh.minX - prevX) < 1 && abs(fresh.minY - prevY) < 1 {
-//                stableCount += 1
-//            } else {
-//                stableCount = 0
-//            }
-//            prevX = fresh.minX
-//            prevY = fresh.minY
-//            window.frame = fresh
-//
-//            if stableCount >= 2 { break } // 连续 200ms 坐标不变，动画已结束
-//        }
+        let app = AXUIElementCreateApplication(window.pid) // 用进程号找到这个游戏客户端
+        AXUIElementSetMessagingTimeout(app, 1.0)            // 游戏不响应时，最多等 1 秒，避免卡死
+        AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue) // 先让整个进程到前台
+
+        var value: CFTypeRef?
+        let copyErr = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) // 取出该进程的全部窗口
+        guard copyErr == .success, let windows = value as? [AXUIElement], !windows.isEmpty else {
+            print("[WindowService] 读取窗口列表失败 pid=\(window.pid) err=\(copyErr.rawValue)")
+            return false
+        }
+
+        var target: AXUIElement?                         // 最终要抬的那一个辅助功能窗口
+        for element in windows {
+            var wid: CGWindowID = 0
+            if _AXUIElementGetWindow(element, &wid) == .success, Int(wid) == window.id {
+                target = element                         // 编号相同，就是扫描时记下的那一扇
+                break
+            }
+        }
+        if target == nil {                               // 编号对不上时，用位置和大小再认一次
+            target = windows.first { element in
+                guard let frame = axFrame(element) else { return false }
+                return abs(frame.minX - window.frame.minX) < 8
+                    && abs(frame.minY - window.frame.minY) < 8
+                    && abs(frame.width - window.frame.width) < 12
+                    && abs(frame.height - window.frame.height) < 12
+            }
+        }
+        guard let target else {
+            print("[WindowService] 找不到窗口 id=\(window.id) 对应的可切换窗口")
+            return false
+        }
+
+        let raiseErr = AXUIElementPerformAction(target, kAXRaiseAction as CFString) // 把这一扇盖到别的窗口上面
+        AXUIElementSetAttributeValue(target, kAXMainAttribute as CFString, kCFBooleanTrue)    // 设为主窗口
+        AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue) // 让它接收键盘
+        return raiseErr == .success
+    }
+
+    /// 保证这扇窗在自己的中心点上是最上层。已经是就马上返回，不必每次都切换。
+    private static func makeFrontmost(_ window: inout GameWindow) -> Bool {
+        refreshIdentity(window: &window)                 // 先用最新位置，避免用拖动前的旧坐标判断
+        func probe() -> CGPoint {
+            CGPoint(x: window.frame.midX, y: window.frame.midY) // 用窗口中心代表“这扇窗所在的位置”
+        }
+        if frontmostWindowID(at: probe()) == window.id { return true } // 中心点已经是自己，不用抬
+
+        guard raiseSpecificWindow(window) else { return false } // 抬起失败（没权限或找不到窗）就放弃这次操作
+
+        let deadline = Date().addingTimeInterval(0.8)    // 层次变化不是瞬时的，最多等 0.8 秒
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.03)          // 每 30 毫秒看一次
+            refreshIdentity(window: &window)
+            if frontmostWindowID(at: probe()) == window.id { return true } // 确认系统已经把它放到最前
+        }
+        if !didLogRaiseFail {
+            didLogRaiseFail = true
+            print("[WindowService] 窗口 id=\(window.id) 仍不在最前，本次点击已跳过，避免点到另一扇游戏。")
+        }
+        return false                                     // 超时仍被挡住，调用方不会发出点击
+    }
+
+    /// 在已经确认的屏幕坐标上发送一次真实点击。游戏只认这种点击。
+    private static func hidClick(at point: CGPoint, button: CGMouseButton) {
+        let dn: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown // 按下
+        let up: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp     // 松开
+        CGEvent(mouseEventSource: nil, mouseType: dn, mouseCursorPosition: point, mouseButton: button)?
+            .post(tap: .cghidEventTap)                   // 发给系统，由最上层窗口接收
+        Thread.sleep(forTimeInterval: 0.1)               // 按下和松开之间留一点时间，游戏才当成一次点击
+        CGEvent(mouseEventSource: nil, mouseType: up, mouseCursorPosition: point, mouseButton: button)?
+            .post(tap: .cghidEventTap)
+    }
+
+    /// 点击的总入口：加锁 → 切到最前 → 算出屏幕点 → 再确认这个点属于自己 → 点击。
+    private static func clickOnFront(window: inout GameWindow, button: CGMouseButton, pointIn: (CGRect) -> CGPoint) {
+        inputLock.lock()                                 // 挡住另一个实例，防止它中途把窗口又盖回来
+        defer { inputLock.unlock() }
+        guard makeFrontmost(&window) else { return }     // 没切到最前就不点
+        let point = pointIn(window.frame)                // 用最新矩形把“窗口内坐标”换成屏幕坐标
+        guard frontmostWindowID(at: point) == window.id else {
+            print("[WindowService] 点击位置仍被挡住，跳过 id=\(window.id)")
+            return                                       // 中心是自己，但这个点击点仍被别的窗盖住
+        }
+        hidClick(at: point, button: button)
     }
 
     // MARK: - 鼠标点击
-    // 坐标系：左上角原点 (0,0)，X 向右增大，Y 向下增大
+    // 下面几个 click 都只负责把“窗口内的点”算成屏幕坐标，真正的切换和点击都在 clickOnFront。
+    // 坐标系：窗口左上角是 (0,0)，X 向右，Y 向下。relX/relY 是占窗口宽高的比例，0.5 就是正中。
     static func clickAt(window: inout GameWindow, relX: Double, relY: Double,
                          noiseRadius: Int = 0) {
-        activateAndStabilize(window: &window)
-        let noise: () -> Double = { Double(Int.random(in: -noiseRadius...noiseRadius)) }
-        let screenPoint = CGPoint(
-            x: window.frame.minX + relX * window.frame.width  + noise(),
-            y: window.frame.minY + relY * window.frame.height + noise()
-        )
-        postMouseClick(at: screenPoint)
+        clickOnFront(window: &window, button: .left) { frame in
+            let nx = Double(Int.random(in: -noiseRadius...noiseRadius)) // 水平随机偏移，避免每次点同一像素
+            let ny = Double(Int.random(in: -noiseRadius...noiseRadius))
+            return CGPoint(x: frame.minX + relX * frame.width + nx,     // 窗口左边 + 比例 × 宽
+                           y: frame.minY + relY * frame.height + ny)     // 窗口上边 + 比例 × 高
+        }
     }
 
     /// 鼠标右键
     static func rightClickAt(window: inout GameWindow, relX: Double, relY: Double,
                               noiseRadius: Int = 0) {
-        activateAndStabilize(window: &window)
-        let noise: () -> Double = { Double(Int.random(in: -noiseRadius...noiseRadius)) }
-        let screenPoint = CGPoint(
-            x: window.frame.minX + relX * window.frame.width  + noise(),
-            y: window.frame.minY + relY * window.frame.height + noise()
-        )
-        postMouseClick(at: screenPoint, button: .right)
+        clickOnFront(window: &window, button: .right) { frame in
+            let nx = Double(Int.random(in: -noiseRadius...noiseRadius))
+            let ny = Double(Int.random(in: -noiseRadius...noiseRadius))
+            return CGPoint(x: frame.minX + relX * frame.width + nx,
+                           y: frame.minY + relY * frame.height + ny)
+        }
     }
 
     /// OCR 点击（归一化坐标）
@@ -470,17 +560,13 @@ class WindowService {
     static func clickAtOCR(window: inout GameWindow, normX: Double, normY: Double,
                             srcW: Int, srcH: Int,
                             noiseRadius: Int = 0) {
-        activateAndStabilize(window: &window)
-        let noise: () -> Double = { Double(Int.random(in: -noiseRadius...noiseRadius)) }
-        // 用源图尺寸换算像素偏移，再转为逻辑点（÷ backingScaleFactor）
-        let scale  = NSScreen.main?.backingScaleFactor ?? 2
-        let ptOffX = normX * Double(srcW) / scale
-        let ptOffY = normY * Double(srcH) / scale
-        let screenPoint = CGPoint(
-            x: window.frame.minX + ptOffX + noise(),
-            y: window.frame.minY + ptOffY + noise()
-        )
-        postMouseClick(at: screenPoint)
+        clickOnFront(window: &window, button: .left) { frame in
+            let nx = Double(Int.random(in: -noiseRadius...noiseRadius))
+            let ny = Double(Int.random(in: -noiseRadius...noiseRadius))
+            let scale = NSScreen.main?.backingScaleFactor ?? 2
+            return CGPoint(x: frame.minX + normX * Double(srcW) / scale + nx,
+                           y: frame.minY + normY * Double(srcH) / scale + ny)
+        }
     }
 
     /// 像素坐标点击（以窗口左上角为原点，单位: pt）
@@ -488,25 +574,21 @@ class WindowService {
     /// 适用场景：游戏渲染分辨率固定（如 1026×798），窗口可随意拖动
     static func clickAtPx(window: inout GameWindow, px: CGFloat, py: CGFloat,
                            noiseRadius: Int = 0) {
-        activateAndStabilize(window: &window)
-        let noise: () -> Double = { Double(Int.random(in: -noiseRadius...noiseRadius)) }
-        let screenPoint = CGPoint(
-            x: window.frame.minX + px + noise(),
-            y: window.frame.minY + py + noise()
-        )
-        postMouseClick(at: screenPoint)
+        clickOnFront(window: &window, button: .left) { frame in
+            let nx = Double(Int.random(in: -noiseRadius...noiseRadius))
+            let ny = Double(Int.random(in: -noiseRadius...noiseRadius))
+            return CGPoint(x: frame.minX + px + nx, y: frame.minY + py + ny)
+        }
     }
 
     /// 鼠标右键（像素坐标）
     static func rightClickAtPx(window: inout GameWindow, px: CGFloat, py: CGFloat,
                                 noiseRadius: Int = 0) {
-        activateAndStabilize(window: &window)
-        let noise: () -> Double = { Double(Int.random(in: -noiseRadius...noiseRadius)) }
-        let screenPoint = CGPoint(
-            x: window.frame.minX + px + noise(),
-            y: window.frame.minY + py + noise()
-        )
-        postMouseClick(at: screenPoint, button: .right)
+        clickOnFront(window: &window, button: .right) { frame in
+            let nx = Double(Int.random(in: -noiseRadius...noiseRadius))
+            let ny = Double(Int.random(in: -noiseRadius...noiseRadius))
+            return CGPoint(x: frame.minX + px + nx, y: frame.minY + py + ny)
+        }
     }
     
   
@@ -522,33 +604,30 @@ class WindowService {
         }
     }
     
-    static func postMouseClick(at point: CGPoint, button: CGMouseButton = .left) {
-        let dn: CGEventType = button == .left ? .leftMouseDown  : .rightMouseDown
-        let up: CGEventType = button == .left ? .leftMouseUp    : .rightMouseUp
-        CGEvent(mouseEventSource: nil, mouseType: dn, mouseCursorPosition: point, mouseButton: button)?
-            .post(tap: .cghidEventTap)
-        Thread.sleep(forTimeInterval: 0.1)
-        CGEvent(mouseEventSource: nil, mouseType: up, mouseCursorPosition: point, mouseButton: button)?
-            .post(tap: .cghidEventTap)
-    }
     // MARK: - 键盘操作
 
-    /// 按下单个键（通过 CGKeyCode）
-    static func pressKey(_ keyCode: CGKeyCode, holdDuration: TimeInterval = 0.05) {
-        let dn = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)
-        let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false)
+    /// 按下单个键。键盘没有坐标，谁在最前就进谁，所以按之前也要先切换窗口。
+    static func pressKey(_ keyCode: CGKeyCode, window: inout GameWindow, holdDuration: TimeInterval = 0.05) {
+        inputLock.lock()                                 // 和点击共用同一把锁
+        defer { inputLock.unlock() }
+        guard makeFrontmost(&window) else { return }     // 没切到最前，这次按键取消
+        let dn = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)  // 按下
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) // 松开
         dn?.post(tap: .cghidEventTap)
-        Thread.sleep(forTimeInterval: holdDuration)
+        Thread.sleep(forTimeInterval: holdDuration)      // 按住这么久
         up?.post(tap: .cghidEventTap)
         Thread.sleep(forTimeInterval: 0.1)
     }
 
     /// 按下带修饰键的组合键（如 Cmd+A、Shift+方向键）
     static func pressKeys(_ keyCode: CGKeyCode, modifiers: CGEventFlags,
-                          window: GameWindow? = nil) {
+                          window: inout GameWindow) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard makeFrontmost(&window) else { return }     // 组合键同样先切到这扇窗
         let dn = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)
         let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false)
-        dn?.flags = modifiers
+        dn?.flags = modifiers                            // 带上 Command / Shift 等修饰键
         up?.flags = modifiers
         dn?.post(tap: .cghidEventTap)
         Thread.sleep(forTimeInterval: 0.5)
