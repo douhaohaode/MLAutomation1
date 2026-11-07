@@ -8,7 +8,6 @@ import AppKit
 
 /// 坐标点
 struct SkillSlots {
-  
         //地府 无名鬼蜮 烧双点位
         static let DF1 = CGPoint(x: 0.5942, y: 0.4590)
         static let DF2 = CGPoint(x: 0.4144, y: 0.4580)
@@ -26,6 +25,12 @@ struct SkillSlots {
         static let L12 = CGPoint(x: 0.2945, y: 0.6403)
         static let L13 = CGPoint(x: 0.2926, y: 0.4806)
         static let L14 = CGPoint(x: 0.4965, y: 0.6298)
+
+        // 小地图缩小后的点，落在 Tab 打开的地图里面
+        static let wj1 = CGPoint(x: 0.5768, y: 0.4678)
+        static let wj2 = CGPoint(x: 0.4329, y: 0.4670)
+        static let wj3 = CGPoint(x: 0.4246, y: 0.6102)
+        static let wj4 = CGPoint(x: 0.5941, y: 0.6102)
 }
 
 /// 键盘
@@ -56,6 +61,7 @@ enum TaskMode: CaseIterable {
     case zhuaGui    // 抓鬼
     case fengyao    // 封妖
     case paoshang   // 跑商
+    case yunyou     // 云游道人
 
     var displayName: String {
         switch self {
@@ -64,6 +70,7 @@ enum TaskMode: CaseIterable {
         case .zhuaGui:    return "抓鬼"
         case .fengyao:    return "封妖"
         case .paoshang:   return "跑商"
+        case .yunyou:     return "云游"
         }
     }
 
@@ -74,6 +81,7 @@ enum TaskMode: CaseIterable {
         case .zhuaGui:    return "👻"
         case .fengyao:    return "⚡️"
         case .paoshang:   return "🛒"
+        case .yunyou:     return "🧙"
         }
     }
 }
@@ -103,6 +111,8 @@ class BotEngine {
     private let popupFinder = BattlePopupFinder()
     /// 点过选人框之后短时间内不再点，避免弹框还没收完就连点。
     private var lastPopupClickAt = Date.distantPast
+    /// 这次奖励弹框里已经点过的格子（0...3）。点过没关掉就换下一个。
+    private var popupTriedCells = Set<Int>()
     /// 没找到弹框时最多一秒看一次，避免整场战斗都在跑模型。
     private var lastPopupScanAt = Date.distantPast
     private var onLog:    ((LogEntry) -> Void)?
@@ -163,6 +173,21 @@ class BotEngine {
     // 🔧 调试：点击坐标监听
     private var clickMonitor: Any?
 
+    /// 烧双因战斗或奖励弹框停住。画面恢复后由主循环自动接着走路，不用重新开始。
+    private var shaoshuangPaused = false
+
+    /// 最近一次看到战斗或奖励弹框的时间。进出战斗有过场动画，那一两秒里画面上
+    /// 既没有「回合」也没有指令栏，不能把它当成「已经安全」。
+    private var lastBattleSeenAt = Date.distantPast
+    /// 战斗结束后至少再等这么久，才允许按 Tab。「回合」偶尔漏读一帧时，这段时间也兜住。
+    private static let settleAfterBattle: TimeInterval = 2.0
+
+    /// 角色上一次被看到在走路的时间。
+    private var lastMoveAt = Date.distantPast
+    /// 角色必须站稳这么久才开始下一轮。遇怪时先有一两秒过场动画，那时还没有「回合」，
+    /// 如果一停下就按 Tab，就会在过场里按下去。站稳这段时间内「回合」一定会出现并被看到。
+    private static let stillBeforeWalk: TimeInterval = 1.5
+
     /// 两个及以上烧双窗口同时运行时，由 AppState 统一决定点哪一扇。
     /// 为 true 时，本引擎只负责截图，不再自己按键点击。
     private let coordLock = NSLock()
@@ -197,6 +222,10 @@ class BotEngine {
             guard let self else { return true }
             return !self.isRunning
         }
+        wanderingTaoistTask.shouldStop = { [weak self] in
+            guard let self else { return true }
+            return !self.isRunning || Task.isCancelled
+        }
     }
 
     // MARK: - 控制
@@ -210,6 +239,7 @@ class BotEngine {
         }
 
         isRunning = true
+        wanderingTaoistTask.reset()
         DispatchQueue.main.async { self.state.status = .running; self.state.startTime = Date() }
         task = Task(priority: .userInitiated) { [weak self] in await self?.mainLoop() }
 
@@ -245,7 +275,8 @@ class BotEngine {
     // │  预览消费者(5fps)  战斗逻辑消费者(原节奏)          │
     // └─────────────────────────────────────────────────┘
     private func mainLoop() async {
-        print("111");
+        // 启动标记：看到这一行，说明跑的是带「回合识别 + 小地图状态验证」的这一版，并显示源码来自哪份工程
+        print("[烧双 v3] 实例\(state.id) 启动 · 源码: \(#filePath)")
         // ── 1. 唯一截图循环 ───────────────────────────────
         // 每 0.2 秒截一次图，写入 frameBuffer
         let captureTask = Task<Void, Never> { [weak self] in
@@ -263,8 +294,9 @@ class BotEngine {
                         return
                     }
                 }
-                // 截图频率：5fps
-                try? await Task.sleep(nanoseconds: 200_000_000)
+                // 平时 5fps。云游道人开抢时改成 50ms，少等一帧。
+                let fast = self.taskMode == .yunyou && self.wanderingTaoistTask.needsFastFrames
+                try? await Task.sleep(nanoseconds: fast ? 50_000_000 : 200_000_000)
             }
         }
         // ── 2. 预览刷新（消费 frameBuffer，直接更新UI）──────
@@ -298,6 +330,11 @@ class BotEngine {
                       try? await Task.sleep(nanoseconds: 500_000_000)
                       continue
                   }
+                 if taskMode == .yunyou {
+                     await wanderingTaoistTask.runOnce()
+                     continue
+                 }
+
                  // 测试（像素坐标版，以窗口左上角为原点）
                  // 当前坐标是临时占位符，请启动程序开始运行后点击游戏界面录制新坐标
                  if taskMode == .test {
@@ -350,35 +387,59 @@ class BotEngine {
                         prevYPx = currentYPx
 
                         if playerMoved {
+                            lastMoveAt = Date()
                             print("玩家移动中 (\(currentXPx), \(currentYPx))")
                             continue  // 移动中不操作，等下一帧
                         }
 
                         print("玩家停止, 地图: \(mapName)")
 
-                        if coordinate.contains("回合") {
-                            if await clickFrontPortrait(in: cgImage) {
-                                await humanDelay(0.8...1.4)
-                                continue
+                        lastPauseWasReward = false
+                        var battlePause = coordinate.contains("回合")
+                        if !battlePause {
+                            battlePause = await shaoshuangMustPause(cgImage)
+                        }
+                        if battlePause {
+                            noteBattle()
+                            await clickRewardPortraitIfNeeded(cgImage)
+                            if !shaoshuangPaused {
+                                shaoshuangPaused = true
+                                log(scene: .unknown, action: "进入战斗或奖励弹框，暂停小地图")
                             }
-                            print("战斗中，等待回合结束")
+                            try? await Task.sleep(nanoseconds: 400_000_000)
                             continue
                         }
+                        // 刚打完：过场动画、掉落提示还没收完，再等一会儿
+                        if Date().timeIntervalSince(lastBattleSeenAt) < Self.settleAfterBattle {
+                            try? await Task.sleep(nanoseconds: 300_000_000)
+                            continue
+                        }
+                        // 刚停下：可能是到了，也可能是遇怪的过场动画，先站稳再说
+                        if Date().timeIntervalSince(lastMoveAt) < Self.stillBeforeWalk {
+                            try? await Task.sleep(nanoseconds: 300_000_000)
+                            continue
+                        }
+                        if shaoshuangPaused {
+                            shaoshuangPaused = false
+                            log(scene: .unknown, action: "战斗和奖励弹框已结束，自动恢复小地图")
+                        }
 
-                        // 随机选传送点，Tab 打开地图 → 点击 → Tab 关闭
-                        let targetPos = getRandomPosition(from: [SkillSlots.DF1, SkillSlots.DF2, SkillSlots.DF3, SkillSlots.DF4])
-                        await humanDelay(0.3...0.6)
-                        await pressKey(GameKeys.tab)
-                        await humanDelay(0.8...1.4)
-                        await click(targetPos)
-                        await humanDelay(1.8...2.6)
-                        await pressKey(GameKeys.tab)
+                        // Tab 打开地图，等地图出来再点，点完再 Tab 关上
+                        let walked = await performShaoshuangWalk()
+                        if !walked {
+                            try? await Task.sleep(nanoseconds: 300_000_000)
+                            continue
+                        }
 
                         // 等待玩家开始移动（最多 4 秒，每 200ms 检测一次）
                         var moved = false
                         for _ in 0..<20 {
                             try? await Task.sleep(nanoseconds: 200_000_000)
                             guard let fresh = await freshFrame() else { continue }
+                            if await shaoshuangMustPause(fresh) {
+                                noteBattle()
+                                break
+                            }
                             let newX = await detector.ocrRegion(fresh, region: UIRegions.xPx)
                             let newY = await detector.ocrRegion(fresh, region: UIRegions.yPx)
                             if newX != prevXPx || newY != prevYPx {
@@ -439,23 +500,6 @@ class BotEngine {
             }
             return nil
         }
-    
-    func getRandomPosition(from points: [CGPoint]) -> CGPoint {
-        guard !points.isEmpty else { return .zero }
-        
-        let randomIndex = Int.random(in: 0..<points.count)
-        let selectedPoint = points[randomIndex]
-        
-        let randomOffsetX = Double.random(in: 0.0003...0.0008)
-        let randomOffsetY = Double.random(in: 0.0003...0.0008)
-        
-        return CGPoint(
-            x: selectedPoint.x + CGFloat(randomOffsetX),
-            y: selectedPoint.y + CGFloat(randomOffsetY)
-        )
-    }
-    
-    
     
     // ── 🔧 调试：点击游戏内位置获取NPC坐标 ──────────────
     private func startClickMonitor() {
@@ -530,13 +574,20 @@ class BotEngine {
 
     /// 看这一扇窗现在的状态。截图不需要把窗口抬到最前。
     /// moved：坐标相对上一次变了，说明人还在走。
-    /// inBattle：战斗区域里出现「回合」。
+    /// inBattle：上方有「回合」，或中间弹出意外奖励。这时不能按 Tab，也不能点击。
     func readShaoshuangView() async -> (inBattle: Bool, moved: Bool)? {
         guard let cgImage = await freshFrame() else { return nil }
-        async let fightTask = detector.ocrRegion(cgImage, region: UIRegions.fightPx)
+        async let pauseTask = shaoshuangMustPause(cgImage)
         async let xTask     = detector.ocrRegion(cgImage, region: UIRegions.xPx)
         async let yTask     = detector.ocrRegion(cgImage, region: UIRegions.yPx)
-        let (fight, x, y) = await (fightTask, xTask, yTask)
+        let (paused, x, y) = await (pauseTask, xTask, yTask)
+        if paused {
+            noteBattle()
+            await clickRewardPortraitIfNeeded(cgImage)
+        }
+        // 战斗刚结束的几秒也算战斗，避免在过场动画里按 Tab
+        let inBattle = paused
+            || Date().timeIntervalSince(lastBattleSeenAt) < Self.settleAfterBattle
 
         let moved: Bool
         if hasWalkBaseline {
@@ -545,9 +596,55 @@ class BotEngine {
             moved = false
             hasWalkBaseline = true
         }
+        if moved { lastMoveAt = Date() }
         lastWalkX = x
         lastWalkY = y
-        return (fight.contains("回合"), moved)
+        return (inBattle, moved)
+    }
+
+    /// 正上方「第 N 回合」。从标题栏下面开始，别把窗口标题文字框进来；
+    /// 高度到倒计时数字为止。原来的 fightPx 太窄，会把「回」字切掉。
+    private static let battleBanner = CGRect(x: 0.30, y: 0.035, width: 0.40, height: 0.105)
+    /// 意外奖励弹框在画面中间。此时上方没有「回合」，弹框文字会一直在，直到被点掉。
+    private static let rewardPopup = CGRect(x: 0.18, y: 0.22, width: 0.64, height: 0.36)
+
+    /// 只认「回合」。识别结果偶尔把「回」或「合」漏掉一个，所以「第」加其中一个字也算。
+    private func looksLikeBattleBanner(_ text: String) -> Bool {
+        let t = text.replacingOccurrences(of: " ", with: "")
+        if t.contains("回合") { return true }
+        return t.contains("第") && (t.contains("回") || t.contains("合"))
+    }
+
+    /// 战斗或意外奖励弹框。为真时不能按 Tab，也不能点击。
+    func shaoshuangMustPause(_ image: CGImage) async -> Bool {
+        lastPauseWasReward = false
+        async let bannerTask = detector.ocrRegion(image, region: Self.battleBanner)
+        async let fightTask  = detector.ocrRegion(image, region: UIRegions.fightPx)
+        let (banner, fight) = await (bannerTask, fightTask)
+        if looksLikeBattleBanner(banner) || looksLikeBattleBanner(fight) { return true }
+        // 顶部没有「回合」时，再看中间有没有意外奖励弹框
+        let popup = await detector.ocrRegion(image, region: Self.rewardPopup)
+        let text = popup.replacingOccurrences(of: " ", with: "")
+        let isReward = text.contains("意外奖励") || text.contains("将会得到") || text.contains("面对着")
+        lastPauseWasReward = isReward
+        return isReward
+    }
+
+    /// 意外奖励弹框要点「面对着你的角色」才会关。只在刚检测到弹框时才去找，
+    /// 找不到人物条就先不动，下一轮再试。
+    @discardableResult
+    func clickRewardPortraitIfNeeded(_ image: CGImage) async -> Bool {
+        guard lastPauseWasReward else {
+            // 弹框已经关了（或根本没有），下次再弹时重新从模型最看好的那个开始试
+            if Date().timeIntervalSince(lastPopupClickAt) > 4 { popupTriedCells.removeAll() }
+            return false
+        }
+        let clicked = await clickFrontPortrait(in: image)
+        if clicked {
+            // 点完弹框会关，战斗结束的过场也要时间，算作刚打完
+            noteBattle()
+        }
+        return clicked
     }
 
     /// 这一扇已经在战斗时才调用。有四人选人框就点正面角色。
@@ -561,44 +658,301 @@ class BotEngine {
 
     /// 用 mhxy 模型在当前截图里找正面角色并点击。没有弹框返回 false。
     func clickFrontPortrait(in cgImage: CGImage) async -> Bool {
-        if Date().timeIntervalSince(lastPopupClickAt) < 2.5 { return false }
+        if Date().timeIntervalSince(lastPopupClickAt) < 1.8 { return false }
         if Date().timeIntervalSince(lastPopupScanAt) < 1.0 { return false }
         lastPopupScanAt = Date()
         guard let hit = await popupFinder.frontPortrait(in: cgImage) else { return false }
         lastPopupClickAt = Date()
         let scores = hit.logits.map { String(format: "%.2f", $0) }.joined(separator: ", ")
+
+        // 模型只是打分，不一定每次都对。按分数从低（像正面）到高排队，
+        // 点过没关掉的就换下一个，四个都试过再从头来。弹框关了才算点对。
+        let ranking = hit.logits.indices.sorted { hit.logits[$0] < hit.logits[$1] }
+        var pick = ranking.first { !popupTriedCells.contains($0) }
+        if pick == nil {
+            popupTriedCells.removeAll()
+            pick = ranking.first
+        }
+        let index = pick ?? hit.index
+        popupTriedCells.insert(index)
+        let center = hit.centers.indices.contains(index) ? hit.centers[index] : hit.center
         log(scene: .battleMyTurn,
-            action: "战斗弹框：点正面角色 #\(hit.index + 1)",
-            detail: "logits [\(scores)]")
-        WindowService.clickAtOCR(window: &state.window,
-                                 normX: hit.center.x, normY: hit.center.y,
-                                 srcW: cgImage.width, srcH: cgImage.height,
-                                 noiseRadius: 2)
+            action: "战斗弹框：点第 \(index + 1) 个角色",
+            detail: "logits [\(scores)]  已试过 \(popupTriedCells.sorted().map { $0 + 1 })")
+        // 和其它点击一样按「占窗口宽高的比例」换算。截图和窗口是同一块区域（含标题栏），
+        // 比例换算不依赖 Retina 倍数，也不会因为窗口在另一块屏幕上而偏移。
+        let frame = state.window.frame
+        print(String(format: "[弹框] 点击 比例(%.4f, %.4f) 截图 %d×%d 窗口 %.0f×%.0f @(%.0f,%.0f) → 屏幕(%.0f, %.0f)",
+                     Double(center.x), Double(center.y), cgImage.width, cgImage.height,
+                     frame.width, frame.height, frame.minX, frame.minY,
+                     frame.minX + Double(center.x) * frame.width,
+                     frame.minY + Double(center.y) * frame.height))
+        saveClickDebugImage(cgImage, at: center)
+        WindowService.clickAt(window: &state.window,
+                              relX: Double(center.x), relY: Double(center.y),
+                              noiseRadius: 2)
         try? await Task.sleep(nanoseconds: UInt64(Double.random(in: clickInterval) * 1_000_000_000))
         return true
     }
 
-    /// 一整段走路：Tab 打开地图、点坐标、Tab 关上。
-    /// 这三步都作用在本窗口上，中间不交给另一扇。调度在本方法返回后再切换。
-    func performShaoshuangWalk() async {
-        guard isRunning else { return }
-        let targetPos = getRandomPosition(from: [
-            SkillSlots.DF1, SkillSlots.DF2, SkillSlots.DF3, SkillSlots.DF4
-        ])
+    /// 把点击前的截图连同点击位置（红圈）存成 /tmp/mlauto_popup_click.png，点错时可以直接看。
+    private var popupDebugSeq = 0
+    private func saveClickDebugImage(_ image: CGImage, at norm: CGPoint) {
+        let w = image.width, h = image.height
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setStrokeColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        ctx.setLineWidth(4)
+        let r = Double(w) / 60
+        ctx.strokeEllipse(in: CGRect(x: Double(norm.x) * Double(w) - r,
+                                     y: Double(h) - Double(norm.y) * Double(h) - r,
+                                     width: r * 2, height: r * 2))
+        guard let out = ctx.makeImage() else { return }
+        let rep = NSBitmapImageRep(cgImage: out)
+        if let data = rep.representation(using: .png, properties: [:]) {
+            try? data.write(to: URL(fileURLWithPath: "/tmp/mlauto_popup_click.png"))
+            popupDebugSeq += 1
+            try? data.write(to: URL(fileURLWithPath: "/tmp/mlauto_popup_click_\(popupDebugSeq % 6).png"))
+        }
+    }
+
+    // MARK: 小地图状态
+    // Tab 是开关，游戏不会告诉我们现在开着还是关着。靠「按了几次」或「画面变没变」都会错：
+    // 只要有一次按键被吞、战斗打断、或者画面因别的原因变化，就会把「关」当成「开」，点在没有地图的场景上。
+    // 小地图右边有一排固定的文字：全部 / 普通 / 商业 / 特殊 / 传送 / 任务 / 出口 / 世界。
+    // 所以直接认这排字：认到就是地图开着，认不到就是没开，不点击。
+
+    private static let probeW = 48
+    private static let probeH = 32
+    /// 中间区域，用来确认画面已经停稳（不是还在渐变）。
+    private static let probeRect = CGRect(x: 0.22, y: 0.22, width: 0.56, height: 0.50)
+    /// 小地图的选项文字（全部/普通/商业…）所在的范围。地图大小不同，这排字的位置也不同（右侧竖排或下方横排）。
+    /// 有的地图（如大唐境外）这排字横着排在地图下面，从左铺到右，所以横向取满整个窗口，只去掉最上面的标题栏和最下面的快捷栏。
+    private static let mapPanelRegion = CGRect(x: 0.0, y: 0.08, width: 1.0, height: 0.80)
+    /// 每组里认到任意一个就算这一项认到。「传送」常被认成「舊送」，所以单独的「送」也算。
+    private static let mapPanelWords: [[String]] = [
+        ["全部"], ["普通"], ["商业"], ["特殊"], ["传送", "送"], ["出口"], ["世界"],
+    ]
+
+    /// 已确认地图是关着的（按完 Tab 后认不到那排字）。为 true 时下一轮不用再认一遍。
+    private var mapKnownClosed = false
+
+    private func noteBattle() {
+        lastBattleSeenAt = Date()
+    }
+
+    /// 最近一次 shaoshuangMustPause 为真时，是不是因为意外奖励弹框（而不是回合）。
+    private var lastPauseWasReward = false
+
+    /// 画面里有没有小地图右侧那排文字。认到 3 项及以上才算，避免聊天栏里零星的「世界」「普通」误判。
+    private func mapPanelVisible(_ image: CGImage) async -> Bool {
+        let raw = await detector.ocrRegion(image, region: Self.mapPanelRegion)
+        let text = raw.replacingOccurrences(of: " ", with: "")
+        let hits = Self.mapPanelWords.filter { group in group.contains { text.contains($0) } }.count
+        return hits >= 3
+    }
+
+    private func probeThumb(_ image: CGImage) -> [UInt8]? {
+        let w = Self.probeW, h = Self.probeH
+        let r = Self.probeRect
+        let crop = CGRect(x: r.minX * Double(image.width),
+                          y: r.minY * Double(image.height),
+                          width: r.width * Double(image.width),
+                          height: r.height * Double(image.height)).integral
+        guard let part = image.cropping(to: crop) else { return nil }
+        var pixels = [UInt8](repeating: 0, count: w * h)
+        let ok = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let ctx = CGContext(data: buffer.baseAddress, width: w, height: h,
+                                      bitsPerComponent: 8, bytesPerRow: w,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+            ctx.interpolationQuality = .medium
+            ctx.draw(part, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? pixels : nil
+    }
+
+    /// 两张缩略图里明显不同的格子数。
+    private func changedCount(_ a: [UInt8], _ b: [UInt8]) -> Int {
+        guard a.count == b.count else { return Int.max }
+        var n = 0
+        for i in 0..<a.count where abs(Int(a[i]) - Int(b[i])) > 30 { n += 1 }
+        return n
+    }
+
+    /// 等一会儿，每 0.25 秒看一次有没有进战斗。进了就返回 true，调用方立刻停手。
+    private func sleepUnlessBattle(_ range: ClosedRange<Double>) async -> Bool {
+        let end = Date().addingTimeInterval(Double.random(in: range))
+        while Date() < end {
+            guard isRunning, !Task.isCancelled else { return true }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if let frame = await freshFrame(), await shaoshuangMustPause(frame) {
+                noteBattle()
+                return true
+            }
+        }
+        return !(isRunning && !Task.isCancelled)
+    }
+
+    private enum MapWait {
+        case shown(thumb: [UInt8])
+        case battle
+        case timeout
+    }
+
+    /// 按完 Tab 之后一直看：认到小地图右侧那排文字，并且中间画面已经停稳，才算地图出来了。
+    /// 最多等 6 秒，期间进了战斗或奖励弹框就立刻返回。
+    private func waitForMapShown() async -> MapWait {
+        let steady = Self.probeW * Self.probeH / 50          // 前后两帧相差不到 2% 算停稳
+        let started = Date()
+        var polls = 0
+        while Date().timeIntervalSince(started) < 6.0 {
+            guard isRunning, !Task.isCancelled else { return .timeout }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard let frame = await freshFrame() else { continue }
+            polls += 1
+            // 文字识别和战斗检测同时做，不互相等
+            async let panelTask = mapPanelVisible(frame)
+            async let pauseTask = shaoshuangMustPause(frame)
+            let (panel, paused) = await (panelTask, pauseTask)
+            if paused {
+                noteBattle()
+                return .battle
+            }
+            guard panel, let before = probeThumb(frame) else { continue }
+            // 认到了文字，再隔一小会儿看一眼，确认画面不再变化
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard let again = await freshFrame(), let after = probeThumb(again) else { continue }
+            if changedCount(before, after) <= steady {
+                print(String(format: "[实例%d] 认到小地图右侧文字，画面已停稳，用时 %.1f 秒",
+                             state.id, Date().timeIntervalSince(started)))
+                return .shown(thumb: after)
+            }
+        }
+        print("[实例\(state.id)] 等了 6 秒都没认到小地图右侧文字")
+        return .timeout
+    }
+
+    /// 走路前先确认地图是关着的。靠认右侧那排文字：认到就说明开着，按 Tab 关掉再认一次。
+    private func ensureMapClosed() async -> Bool {
+        if mapKnownClosed { return true }
+        for _ in 0..<3 {
+            guard isRunning, !Task.isCancelled, let frame = await freshFrame() else { return false }
+            if await shaoshuangMustPause(frame) {
+                noteBattle()
+                return false
+            }
+            if !(await mapPanelVisible(frame)) {
+                mapKnownClosed = true
+                return true
+            }
+            log(scene: .unknown, action: "发现小地图开着（可能是战斗前没关上），先关掉")
+            await pressKey(GameKeys.tab)
+            // 截图最多落后 0.2 秒，等 0.5 秒再认才是按完之后的画面
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        log(scene: .unknown, action: "小地图一直关不上（还能认到右侧文字），这次不走路")
+        _ = await sleepUnlessBattle(1.5...2.0)
+        return false
+    }
+
+    /// 点完之后关地图：按 Tab，再认右侧那排文字，认不到才算关好，认得到就再按。
+    /// 战斗里不按 Tab，留给下一轮开头去收拾。
+    private func closeMapVerified() async {
+        for attempt in 1...3 {
+            guard isRunning, !Task.isCancelled else { return }
+            guard let frame = await freshFrame() else { return }
+            if await shaoshuangMustPause(frame) {
+                noteBattle()
+                log(scene: .unknown, action: "战斗中，不按 Tab，战斗结束后下一轮先检查地图")
+                return
+            }
+            log(scene: .unknown, action: "走路：关闭地图", detail: "第 \(attempt) 次")
+            await pressKey(GameKeys.tab)
+            // 截图最多落后 0.2 秒，等 0.45 秒再认才是按完之后的画面
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard isRunning, !Task.isCancelled, let after = await freshFrame() else { return }
+            if !(await mapPanelVisible(after)) {
+                log(scene: .unknown, action: "小地图已关闭")
+                mapKnownClosed = true
+                return
+            }
+            log(scene: .unknown, action: "还能认到小地图右侧文字，再按一次 Tab")
+        }
+    }
+
+    /// 一整段走路：确认地图是关的 → Tab 打开，认到右侧文字才继续 → 点击 → 很快关上并确认。
+    /// 认不到右侧文字就不点击。任何一步发现战斗或奖励弹框就立刻停手，不再按 Tab、不再点击；
+    /// 战斗结束后，下一轮开头会先认一遍地图是不是还开着，开着就先关。
+    @discardableResult
+    func performShaoshuangWalk() async -> Bool {
+        guard isRunning, !Task.isCancelled else { return false }
+        guard let before = await freshFrame() else { return false }
+        if await shaoshuangMustPause(before) {
+            noteBattle()
+            log(scene: .unknown, action: "战斗或奖励弹框中，不打开小地图")
+            return false
+        }
+        if Date().timeIntervalSince(lastBattleSeenAt) < Self.settleAfterBattle {
+            return false
+        }
+        if Date().timeIntervalSince(lastMoveAt) < Self.stillBeforeWalk {
+            return false
+        }
+
+        // 1. 打完仗后地图可能残留，先关
+        guard await ensureMapClosed() else { return false }
+
+        // 用界面里选的烧双地点预设的点位（每张地图的小地图位置不同）
+        let scene = ShaoshuangPresets.preset(id: state.shaoshuangPresetID)
+        let targetPos = getRandomPosition(from: scene.points)
+
+        // 2. 打开，等认到右侧文字且画面停稳。认不到就不点。
         log(scene: .unknown, action: "走路：打开地图")
-        await humanDelay(0.3...0.6)
-        guard isRunning else { return }
+        mapKnownClosed = false          // 按下去之后就不确定了，直到认过一次
         await pressKey(GameKeys.tab)
-        guard isRunning else { return }
-        await humanDelay(0.8...1.4)
-        guard isRunning else { return }
-        log(scene: .unknown, action: "走路：点击坐标")
+        let shown = await waitForMapShown()
+        guard case .shown(let settledThumb) = shown else {
+            if case .battle = shown {
+                log(scene: .unknown, action: "等地图时进入战斗，取消点击")
+            } else {
+                log(scene: .unknown, action: "没认到小地图（Tab 可能被吞了），这次不点击")
+                _ = await sleepUnlessBattle(1.0...1.5)   // 隔一会儿再试，别连着乱按 Tab
+            }
+            return false
+        }
+
+        // 点击前再看一眼中间画面没变（地图没被关掉）
+        if let nowFrame = await freshFrame(), let nowThumb = probeThumb(nowFrame),
+           changedCount(settledThumb, nowThumb) > Self.probeW * Self.probeH / 20 {
+            log(scene: .unknown, action: "点击前画面又变了，这次不点击")
+            return false
+        }
+
+        // 3. 点击
+        log(scene: .unknown,
+            action: "走路：点击坐标",
+            detail: String(format: "[%@] (%.3f, %.3f)", scene.name, Double(targetPos.x), Double(targetPos.y)))
         await click(targetPos)
-        guard isRunning else { return }
-        await humanDelay(1.8...2.6)
-        guard isRunning else { return }
-        await pressKey(GameKeys.tab)
-        log(scene: .unknown, action: "走路：关闭地图，准备交给另一扇")
+        guard isRunning, !Task.isCancelled else { return false }
+
+        // 4. 点完很快就关。人一点完就开始走路，地图开得越久，越容易在开着的时候遇怪
+        try? await Task.sleep(nanoseconds: UInt64(Double.random(in: 0.12...0.2) * 1_000_000_000))
+        await closeMapVerified()
+        lastMoveAt = Date()   // 点完之后角色在走，下一轮要等它停稳
+        return true
+    }
+
+    func getRandomPosition(from points: [CGPoint]) -> CGPoint {
+        guard !points.isEmpty else { return .zero }
+        let selectedPoint = points[Int.random(in: 0..<points.count)]
+        return CGPoint(
+            x: selectedPoint.x + CGFloat(Double.random(in: 0.0003...0.0008)),
+            y: selectedPoint.y + CGFloat(Double.random(in: 0.0003...0.0008))
+        )
     }
 
     // MARK: - 辅助
@@ -626,6 +980,9 @@ class BotEngine {
     }
 
     private func log(scene: GameScene, action: String, detail: String = "") {
+        // 同步打到 Xcode 控制台，排查烧双时序时不用再翻 App 里的日志面板
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"
+        print("\(f.string(from: Date())) [实例\(state.id)] \(action)\(detail.isEmpty ? "" : "  \(detail)")")
         let entry = LogEntry(timestamp: Date(), instanceIndex: state.id,
                              scene: scene, action: action, detail: detail)
         DispatchQueue.main.async { self.onLog?(entry) }
@@ -678,12 +1035,25 @@ class BotEngine {
 // actor 保证多个 Task 并发读写时不产生数据竞争
 actor FrameBuffer {
     private var latest: NSImage? = nil
+    private var serial: UInt64 = 0
 
     func set(_ image: NSImage) {
         latest = image
+        serial &+= 1
     }
 
     func get() -> NSImage? {
         return latest
+    }
+
+    func snapshot() -> (image: NSImage, serial: UInt64)? {
+        guard let latest else { return nil }
+        return (latest, serial)
+    }
+
+    /// 序号变了才把这一帧交出去，避免抢购循环对同一张图反复做模板匹配。
+    func getIfNewer(than seen: UInt64) -> (image: NSImage, serial: UInt64)? {
+        guard serial != seen, let latest else { return nil }
+        return (latest, serial)
     }
 }

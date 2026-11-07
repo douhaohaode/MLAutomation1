@@ -243,7 +243,7 @@ class AppState: ObservableObject {
     }
 
     // MARK: - 烧双双窗口调度
-    // 一次走路（Tab、点击、Tab）始终留在同一扇窗口。
+    // 一次走路（确认小地图出现、点地图内部、再确认关上）始终留在同一扇窗口。
     // 点完后把下一轮交给另一扇，中间大约隔 2 秒。
     // 若即将操作的窗口已经在战斗，立刻改操作另一扇，不等满 2 秒。
 
@@ -310,6 +310,7 @@ class AppState: ObservableObject {
 
         var nextIndex = 0
         var actNow = true
+        var pausedIDs = Set<Int>()
 
         while !Task.isCancelled && generation == dualWalkGenerationNow() {
             let running = members.filter { $0.isRunning && $0.taskMode == .shaoshuang }
@@ -322,26 +323,27 @@ class AppState: ObservableObject {
             actNow = false
             guard members.indices.contains(nextIndex) else { break }
 
-            if await offerBattlePopups(members) {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                guard generation == dualWalkGenerationNow() else { break }
-            }
-
             guard let view = await members[nextIndex].readShaoshuangView() else {
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 continue
             }
 
             if view.inBattle {
+                if pausedIDs.insert(members[nextIndex].instanceID).inserted {
+                    logDual("实例 \(members[nextIndex].instanceID) 进入战斗或奖励弹框，暂停小地图")
+                }
                 if let free = await firstWalkableIndex(members, after: nextIndex) {
                     logDual("实例 \(members[nextIndex].instanceID) 战斗中，改操作实例 \(members[free].instanceID)")
                     nextIndex = free
                     actNow = true
                 } else {
-                    logDual("两扇都在战斗，2 秒后再看弹框")
+                    logDual("两扇都在战斗，2 秒后再看是否结束")
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
                 continue
+            }
+            if pausedIDs.remove(members[nextIndex].instanceID) != nil {
+                logDual("实例 \(members[nextIndex].instanceID) 战斗和奖励弹框已结束，自动恢复小地图")
             }
 
             if view.moved {
@@ -362,18 +364,6 @@ class AppState: ObservableObject {
                 nextIndex = handed
             }
         }
-    }
-
-    /// 战斗中的窗口如果弹出四人框，点正面角色。走路仍然留给没在战斗的那一扇。
-    private func offerBattlePopups(_ members: [BotEngine]) async -> Bool {
-        var clicked = false
-        for engine in members where engine.isRunning && engine.taskMode == .shaoshuang {
-            if await engine.clickFrontPortraitIfPopup() {
-                logDual("实例 \(engine.instanceID) 战斗弹框，已点正面角色")
-                clicked = true
-            }
-        }
-        return clicked
     }
 
     /// 最多等 2 秒。期间如果预定的窗口进入战斗，而另一扇还能走，立刻改去那一扇。

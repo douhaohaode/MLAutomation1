@@ -133,6 +133,11 @@ struct InstanceCard: View {
             // 任务模式选择器
             TaskModePicker(instance: instance)
 
+            // 烧双：选地点、录制点位
+            if instance.taskMode == .shaoshuang {
+                ShaoshuangPresetPicker(instance: instance)
+            }
+
             // 统计行
             HStack {
                 StatChip(icon: "⚔️", value: "\(instance.battles)")
@@ -191,6 +196,30 @@ struct TaskModePicker: View {
                     }
                 }
             }
+        }
+    }
+}
+
+// MARK: - 烧双地点选择（预设）
+struct ShaoshuangPresetPicker: View {
+    @ObservedObject var instance: InstanceState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("烧双地点")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.gray)
+
+            Picker("", selection: Binding<String>(
+                get: { ShaoshuangPresets.preset(id: instance.shaoshuangPresetID).id },
+                set: { instance.shaoshuangPresetID = $0 }
+            )) {
+                ForEach(ShaoshuangPresets.all) { preset in
+                    Text(preset.name).tag(preset.id)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
         }
     }
 }

@@ -20,6 +20,7 @@
 		C9C1CAD42F651D4B00BC9736 /* WindowService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9C1CAD32F651D4B00BC9736 /* WindowService.swift */; };
 		C9C1CAD62F651D5600BC9736 /* SceneDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9C1CAD52F651D5600BC9736 /* SceneDetector.swift */; };
 		C9F8D12D2F7423BB00D3232D /* Task3.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9F8D12C2F7423BB00D3232D /* Task3.swift */; };
+		D4E5F6012FA1000100SLOT01 /* ShopFirstSlot.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E5F6002FA1000100SLOT01 /* ShopFirstSlot.swift */; };
 		EC92DD5D2F693A5C00BAD192 /* Task2.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC92DD5C2F693A5600BAD192 /* Task2.swift */; };
 		F1A2B3C42F80000100FENG01 /* FengyaoTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C32F80000100FENG01 /* FengyaoTask.swift */; };
 		B7E4A1022F91000100A10001 /* BattlePopupFinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E4A1012F91000100A10001 /* BattlePopupFinder.swift */; };
@@ -45,6 +46,7 @@
 		C9C1CAD52F651D5600BC9736 /* SceneDetector.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SceneDetector.swift; sourceTree = "<group>"; };
 		C9C1CAD92F651F8D00BC9736 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		C9F8D12C2F7423BB00D3232D /* Task3.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Task3.swift; sourceTree = "<group>"; };
+		D4E5F6002FA1000100SLOT01 /* ShopFirstSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShopFirstSlot.swift; sourceTree = "<group>"; };
 		EC92DD5C2F693A5600BAD192 /* Task2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Task2.swift; sourceTree = "<group>"; };
 		F1A2B3C32F80000100FENG01 /* FengyaoTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FengyaoTask.swift; sourceTree = "<group>"; };
 		B7E4A1012F91000100A10001 /* BattlePopupFinder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BattlePopupFinder.swift; sourceTree = "<group>"; };
@@ -109,6 +111,7 @@
 				C906C8BA2F66F73600AC0ADB /* task */,
 				C9C1CAD92F651F8D00BC9736 /* Info.plist */,
 				C9C1CAD52F651D5600BC9736 /* SceneDetector.swift */,
+				D4E5F6002FA1000100SLOT01 /* ShopFirstSlot.swift */,
 				C9C1CAD32F651D4B00BC9736 /* WindowService.swift */,
 				C9C1CACF2F651D3700BC9736 /* BotEngine.swift */,
 				C9C1CACD2F651D2C00BC9736 /* KeyCode.swift */,
@@ -211,6 +214,7 @@
 				C9C1CAD62F651D5600BC9736 /* SceneDetector.swift in Sources */,
 				C9C1CACC2F651CFF00BC9736 /* Models.swift in Sources */,
 				C9F8D12D2F7423BB00D3232D /* Task3.swift in Sources */,
+				D4E5F6012FA1000100SLOT01 /* ShopFirstSlot.swift in Sources */,
 				C9C1CACE2F651D2C00BC9736 /* KeyCode.swift in Sources */,
 				C9C1CAD42F651D4B00BC9736 /* WindowService.swift in Sources */,
 				C906C8BC2F66F74500AC0ADB /* Task1.swift in Sources */,

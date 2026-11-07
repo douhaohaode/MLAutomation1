@@ -44,6 +44,74 @@ struct TemplateMatch {
     let normRect:   CGRect   // 归一化坐标（可直接用于点击）
 }
 
+/// 模板在全图里的命中。center 是模板中心的归一化坐标，可直接交给 clickAt。
+struct TemplateHit {
+    let score: Double
+    let center: CGPoint
+}
+
+/// 灰度模板缓存。资源按 1024 宽画面的 1x 像素裁好，匹配时不再放大。
+private final class TemplateImageStore {
+    struct Gray {
+        let pixels: [UInt8]
+        let tw: Int
+        let th: Int
+        let mean: Double
+        let std: Double
+    }
+
+    private static var cache: [String: Gray] = [:]
+    private static var missing: Set<String> = []
+
+    static func gray(named name: String) -> Gray? {
+        if let hit = cache[name] { return hit }
+        if missing.contains(name) { return nil }
+        guard let image = NSImage(named: name),
+              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let pixels = Self.grayPixels(cg) else {
+            missing.insert(name)
+            print("[模板] 没有加载到 \(name)")
+            return nil
+        }
+        let count = Double(pixels.count)
+        var sum = 0.0
+        var sumSq = 0.0
+        for v in pixels {
+            let d = Double(v)
+            sum += d
+            sumSq += d * d
+        }
+        let mean = sum / count
+        let variance = sumSq / count - mean * mean
+        guard variance > 1 else {
+            missing.insert(name)
+            return nil
+        }
+        let gray = Gray(pixels: pixels, tw: cg.width, th: cg.height, mean: mean, std: sqrt(variance))
+        cache[name] = gray
+        return gray
+    }
+
+    private static func grayPixels(_ image: CGImage) -> [UInt8]? {
+        let w = image.width
+        let h = image.height
+        guard w > 0, h > 0 else { return nil }
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &pixels, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var gray = [UInt8](repeating: 0, count: w * h)
+        for i in 0..<(w * h) {
+            let o = i * 4
+            let y = 0.299 * Double(pixels[o]) + 0.587 * Double(pixels[o + 1]) + 0.114 * Double(pixels[o + 2])
+            gray[i] = UInt8(min(255, max(0, y.rounded())))
+        }
+        return gray
+    }
+}
+
 
 // MARK:  UI 区域（相对窗口比例坐标）⚠️ 需根据实际分辨率校准
 struct UIRegions {
@@ -449,7 +517,74 @@ extension SceneDetector {
         print("[NPCFinder] ✅ score=\(String(format:"%.3f",bestScore)) 点击=(\(String(format:"%.4f",normX)),\(String(format:"%.4f",normY)))")
         return CGPoint(x: normX, y: normY)
     }
-    
+
+    /// 在指定区域内用一张资源模板做归一化相关。
+    /// 搜索前会把区域缩到 CoordBase 的像素密度，模板按 1024 宽游戏画面的 1x 尺寸使用。
+    /// 模板缺失或区域比模板还小的时候返回 nil。
+    func findTemplate(named name: String, in image: CGImage, roi: CGRect) -> TemplateHit? {
+        guard let template = TemplateImageStore.gray(named: name) else { return nil }
+
+        let fullW = image.width
+        let fullH = image.height
+        let roiX = max(0, Int((roi.minX * Double(fullW)).rounded(.down)))
+        let roiY = max(0, Int((roi.minY * Double(fullH)).rounded(.down)))
+        let roiW = min(fullW - roiX, max(1, Int((roi.width * Double(fullW)).rounded())))
+        let roiH = min(fullH - roiY, max(1, Int((roi.height * Double(fullH)).rounded())))
+        guard roiW > template.tw, roiH > template.th,
+              let roiImage = image.cropping(to: CGRect(x: roiX, y: roiY, width: roiW, height: roiH))
+        else { return nil }
+
+        let dstW = max(template.tw + 2, Int((roi.width * Double(CoordBase.width)).rounded()))
+        let dstH = max(template.th + 2, Int((roi.height * Double(CoordBase.height)).rounded()))
+        let work: CGImage
+        if abs(roiW - dstW) > 4 || abs(roiH - dstH) > 4 {
+            guard let scaled = resizeCGImage(roiImage, to: CGSize(width: dstW, height: dstH)) else { return nil }
+            work = scaled
+        } else {
+            work = roiImage
+        }
+        guard work.width > template.tw, work.height > template.th,
+              let sceneGray = extractGray(from: work) else { return nil }
+
+        let tw = template.tw
+        let th = template.th
+        let searchW = work.width - tw
+        let searchH = work.height - th
+        let step = 4
+        var bestScore: Float = -1
+        var bestX = 0
+        var bestY = 0
+        for y in stride(from: 0, to: searchH, by: step) {
+            for x in stride(from: 0, to: searchW, by: step) {
+                let s = nccScore(scenePixels: sceneGray, sceneW: work.width,
+                                 templatePixels: template.pixels, tw: tw, th: th,
+                                 atX: x, atY: y, tMean: template.mean, tStd: template.std)
+                if s > bestScore { bestScore = s; bestX = x; bestY = y }
+            }
+        }
+        let x0 = max(0, bestX - step)
+        let y0 = max(0, bestY - step)
+        let x1 = min(searchW - 1, bestX + step)
+        let y1 = min(searchH - 1, bestY + step)
+        if x1 >= x0, y1 >= y0 {
+            for y in y0...y1 {
+                for x in x0...x1 {
+                    let s = nccScore(scenePixels: sceneGray, sceneW: work.width,
+                                     templatePixels: template.pixels, tw: tw, th: th,
+                                     atX: x, atY: y, tMean: template.mean, tStd: template.std)
+                    if s > bestScore { bestScore = s; bestX = x; bestY = y }
+                }
+            }
+        }
+
+        let scaleX = Double(roiW) / Double(work.width)
+        let scaleY = Double(roiH) / Double(work.height)
+        let absX = Double(roiX) + (Double(bestX) + Double(tw) / 2.0) * scaleX
+        let absY = Double(roiY) + (Double(bestY) + Double(th) / 2.0) * scaleY
+        return TemplateHit(score: Double(bestScore),
+                           center: CGPoint(x: absX / Double(fullW), y: absY / Double(fullH)))
+    }
+
     // MARK: - 工具方法
     private func resizeCGImage(_ image: CGImage, to size: CGSize) -> CGImage? {
         let ctx = CGContext(data: nil,

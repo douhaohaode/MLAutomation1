@@ -21,6 +21,8 @@ struct BattlePortraitHit {
     let center: CGPoint
     let logit: Double
     let logits: [Double]
+    /// 四个格子各自的点击点（和 logits 同序），模型选错时可以换下一个
+    let centers: [CGPoint]
 }
 
 final class BattlePopupFinder {
@@ -87,7 +89,12 @@ final class BattlePopupFinder {
         }
 
         let strip: CGRect
-        if let matched = matchTemplateStrip(in: image) {
+        var clickDown = 0.0   // 点击点比格子中心再往下多少像素
+        if let laid = await layoutStrip(in: image) {
+            strip = laid
+            // 格子中心常落在角色的头上，往下一点点在身体中间，更稳
+            clickDown = 14.0 * Double(image.width) / 1024.0
+        } else if let matched = matchTemplateStrip(in: image) {
             strip = matched
         } else if let read = await matchTextStrip(in: image) {
             strip = read
@@ -111,7 +118,7 @@ final class BattlePopupFinder {
             }
             logits.append(logit)
             centers.append(CGPoint(x: cell.midX / CGFloat(image.width),
-                                   y: cell.midY / CGFloat(image.height)))
+                                   y: (cell.midY + CGFloat(clickDown)) / CGFloat(image.height)))
         }
 
         guard let best = logits.enumerated().min(by: { $0.element < $1.element }) else { return nil }
@@ -120,10 +127,45 @@ final class BattlePopupFinder {
         return BattlePortraitHit(index: best.offset,
                                  center: centers[best.offset],
                                  logit: best.element,
-                                 logits: logits)
+                                 logits: logits,
+                                 centers: centers)
     }
 
     // MARK: - 定位人物条
+
+    /// 这个游戏窗口里，意外奖励弹框是一块固定大小的深色面板：宽约 451、人物区高约 156（按 1024 宽的画面算），
+    /// 四个角色等间距站在面板里，每格约 113 宽。原仓库那套偏移是按另一种分辨率量的，在这里会错位，
+    /// 所以直接以弹框第一行文字的左上角为锚点来算。
+    /// 在 1024 宽截图里量得：文字左边比面板左边多 17，人物区顶边在第一行文字顶边下 32。
+    private func layoutStrip(in image: CGImage) async -> CGRect? {
+        let texts = await recognize(image)
+        let s = Double(image.width) / 1024.0
+
+        let firstKeys = ["恭喜", "将会得到", "意外奖"]
+        let secondKeys = ["面对着", "关闭窗口"]
+        let firstLines = texts.filter { t in firstKeys.contains { t.text.contains($0) } }
+        let secondLines = texts.filter { t in secondKeys.contains { t.text.contains($0) } }
+        guard !firstLines.isEmpty || !secondLines.isEmpty else { return nil }
+
+        // 文字块的左边：第一、二行左对齐，取最靠左的；顶边：第一行的顶，只找到第二行就往上补一行
+        let left = (firstLines + secondLines).map { Double($0.x) }.min() ?? 0
+        let top: Double
+        if let first = firstLines.min(by: { $0.y < $1.y }) {
+            top = Double(first.y)
+        } else if let second = secondLines.min(by: { $0.y < $1.y }) {
+            top = Double(second.y) - 14 * s
+        } else {
+            return nil
+        }
+
+        let rect = CGRect(x: left - 17 * s, y: top + 32 * s, width: 451 * s, height: 156 * s)
+        let used = (firstLines + secondLines).map { "「\($0.text)」@(\($0.x),\($0.y))" }.joined(separator: " ")
+        print("[弹框] 用来定位的文字 \(used)")
+        guard stripLooksValid(rect, in: image) else { return nil }
+        print(String(format: "[弹框] 按文字位置排版人物区 x=%.0f y=%.0f w=%.0f h=%.0f（截图宽 %d）",
+                     rect.minX, rect.minY, rect.width, rect.height, image.width))
+        return rect
+    }
 
     /// 在缩放到参考宽度的灰度图上做归一化相关，命中后把偏移映射回原图像素。
     private func matchTemplateStrip(in image: CGImage) -> CGRect? {

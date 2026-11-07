@@ -187,6 +187,8 @@ class InstanceState: ObservableObject, Identifiable {
 
     @Published var status: BotStatus       = .idle
     @Published var taskMode: TaskMode        = .fengyao
+    /// 烧双时用哪个地点预设的点位（ShaoshuangPresets 里的 id）。nil 表示用列表里的第一个。
+    @Published var shaoshuangPresetID: String? = nil
     @Published var strategy: BattleStrategy = .normalAttack
     @Published var currentScene: GameScene  = .unknown
     @Published var hpPercent: Double        = 1.0
@@ -213,5 +215,51 @@ class InstanceState: ObservableObject, Identifiable {
     init(id: Int, window: GameWindow) {
         self.id     = id
         self.window = window
+    }
+}
+
+// MARK: - 烧双地点预设
+/// 一个烧双地点：名字 + Tab 小地图上要点的几个点（占窗口宽高的比例，和其它点击同一套坐标）。
+/// 每张地图的小地图大小、位置都不同，所以点位按地点预设好，界面里直接选。
+struct ShaoshuangPreset: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let points: [CGPoint]
+}
+
+enum ShaoshuangPresets {
+    /// 新增地点：在这里加一项即可，界面下拉框会自动出现。
+    /// 点位 = 打开该地图小地图后，要点的位置 / 窗口宽高（窗口 1026×798，含标题栏）。
+    static let all: [ShaoshuangPreset] = [
+        // 以下三张按小地图截图估算：落在地图图像中部偏散的四个角，别贴边
+        ShaoshuangPreset(id: "dtjw", name: "大唐境外", points: [
+            CGPoint(x: 0.370, y: 0.482), CGPoint(x: 0.624, y: 0.482),
+            CGPoint(x: 0.370, y: 0.570), CGPoint(x: 0.624, y: 0.570),
+        ]),
+        ShaoshuangPreset(id: "dtgj", name: "大唐国境", points: [
+            CGPoint(x: 0.380, y: 0.414), CGPoint(x: 0.546, y: 0.414),
+            CGPoint(x: 0.380, y: 0.627), CGPoint(x: 0.546, y: 0.627),
+        ]),
+        ShaoshuangPreset(id: "csjw", name: "长寿郊外", points: [
+            CGPoint(x: 0.390, y: 0.426), CGPoint(x: 0.526, y: 0.426),
+            CGPoint(x: 0.390, y: 0.602), CGPoint(x: 0.526, y: 0.602),
+        ]),
+        // 以下是原来代码里就有的点位
+        ShaoshuangPreset(id: "mini", name: "通用（小地图缩小后）", points: [
+            SkillSlots.wj1, SkillSlots.wj2, SkillSlots.wj3, SkillSlots.wj4,
+        ]),
+        ShaoshuangPreset(id: "df", name: "地府 无名鬼蜮", points: [
+            SkillSlots.DF1, SkillSlots.DF2, SkillSlots.DF3, SkillSlots.DF4,
+        ]),
+        ShaoshuangPreset(id: "df4", name: "地府 4 层", points: [
+            SkillSlots.DF41, SkillSlots.DF42, SkillSlots.DF43, SkillSlots.DF44,
+        ]),
+        ShaoshuangPreset(id: "l1", name: "龙 1", points: [
+            SkillSlots.L11, SkillSlots.L12, SkillSlots.L13, SkillSlots.L14,
+        ]),
+    ]
+
+    static func preset(id: String?) -> ShaoshuangPreset {
+        all.first { $0.id == id } ?? all[0]
     }
 }
